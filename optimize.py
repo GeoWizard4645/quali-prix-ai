@@ -12,11 +12,14 @@ Fitness: a finished lap is scored by lap time (seconds). A crash is scored
 further before crashing, and any finished lap beats any crash.
 
 Usage:
-    python3 optimize.py --hours 8 --circuit lasvegas
-    python3 optimize.py --hours 8 --circuit lasvegas --resume   # (default; see --out)
+    python3 optimize.py --circuit lasvegas
+    python3 optimize.py --circuit lasvegas --hours 8   # optional safety cap
 
-Checkpoints runs/best.json on every improvement and appends one row to
-runs/history.csv per improvement (generation, elapsed seconds, best score).
+Runs until paused/stopped from dashboard.py (or --hours elapses, if given).
+Checkpoints runs/<circuit>_best.json on every improvement and appends one
+row to runs/<circuit>_history.csv per improvement (generation, elapsed
+seconds, best score); writes runs/<circuit>_live.json every generation for
+the dashboard.
 """
 import argparse
 import csv
@@ -28,6 +31,7 @@ from multiprocessing import Pool
 import numpy as np
 
 import sim
+from control import control_path, read_control, wait_while_paused
 from sim import DT, get_track
 
 TRACK = None
@@ -100,7 +104,7 @@ def save_best(path, track, genome, fit, finished, dist):
 
 
 def save_live(path, track, gen, elapsed, sigma, pop, elite_n, workers,
-              best_fit, best_fin, best_dist, trajectory=None):
+              best_fit, best_fin, best_dist, trajectory=None, paused=False):
     payload = {
         "circuit": track.circuit_id,
         "generation": gen,
@@ -113,6 +117,7 @@ def save_live(path, track, gen, elapsed, sigma, pop, elite_n, workers,
         "lap_length": track.lap_length,
         "track_length": track.length,
         "medals": MEDALS.get(track.circuit_id),
+        "paused": paused,
     }
     if trajectory is not None:
         payload["trajectory"] = trajectory
@@ -124,7 +129,8 @@ def save_live(path, track, gen, elapsed, sigma, pop, elite_n, workers,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hours", type=float, default=8)
+    ap.add_argument("--hours", type=float, default=None,
+                     help="optional safety cap in hours; omit to run until paused/stopped from the dashboard")
     ap.add_argument("--pop", type=int, default=64)
     ap.add_argument("--elite", type=int, default=8)
     ap.add_argument("--workers", type=int, default=os.cpu_count())
@@ -151,15 +157,27 @@ def main():
 
     sigma, stale, gen = 25.0, 0, 0
     best_fit = float("inf")
+    best_dist = 0.0
+    best_fin = False
     best_trajectory = None
     t0 = time.time()
-    deadline = t0 + args.hours * 3600
+    deadline = t0 + args.hours * 3600 if args.hours else float("inf")
+    ctrl_path = control_path("optimize", args.circuit)
 
     with Pool(args.workers, initializer=_init_worker, initargs=(args.circuit, args.data_dir)) as pool, \
          open(hist_path, "a", newline="") as hf:
         hist = csv.writer(hf)
         elite = score_population(pool, [seed])
-        while time.time() < deadline:
+
+        def _on_pause_tick(_c):
+            save_live(live_path, track, gen, time.time() - t0, sigma, args.pop, args.elite,
+                      args.workers, best_fit, best_fin, best_dist, best_trajectory, paused=True)
+
+        while True:
+            if wait_while_paused(ctrl_path, on_tick=_on_pause_tick):
+                break
+            if time.time() >= deadline:
+                break
             gen += 1
             kids = []
             for _ in range(args.pop):
@@ -193,9 +211,9 @@ def main():
                     stale = 0
 
             save_live(live_path, track, gen, time.time() - t0, sigma, args.pop, args.elite,
-                      args.workers, best_fit, best_fin, best_dist, best_trajectory)
+                      args.workers, best_fit, best_fin, best_dist, best_trajectory, paused=False)
 
-    print(f"done. best fitness={best_fit:.3f} -> {out_path}", flush=True)
+    print(f"done (stopped or --hours elapsed). best fitness={best_fit:.3f} -> {out_path}", flush=True)
 
 
 if __name__ == "__main__":
