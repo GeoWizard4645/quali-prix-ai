@@ -26,6 +26,7 @@ import csv
 import json
 import os
 import time
+from collections import deque
 from multiprocessing import Pool
 
 import numpy as np
@@ -104,7 +105,8 @@ def save_best(path, track, genome, fit, finished, dist):
 
 
 def save_live(path, track, gen, elapsed, sigma, pop, elite_n, workers,
-              best_fit, best_fin, best_dist, trajectory=None, paused=False):
+              best_fit, best_fin, best_dist, trajectory=None, paused=False,
+              recent_success_rate=None, total_evaluated=0, total_finished=0):
     payload = {
         "circuit": track.circuit_id,
         "generation": gen,
@@ -118,6 +120,9 @@ def save_live(path, track, gen, elapsed, sigma, pop, elite_n, workers,
         "track_length": track.length,
         "medals": MEDALS.get(track.circuit_id),
         "paused": paused,
+        "recent_success_rate": recent_success_rate,
+        "total_attempts": total_evaluated,
+        "total_finished": total_finished,
     }
     if trajectory is not None:
         payload["trajectory"] = trajectory
@@ -163,6 +168,12 @@ def main():
     t0 = time.time()
     deadline = t0 + args.hours * 3600 if args.hours else float("inf")
     ctrl_path = control_path("optimize", args.circuit)
+    # How often a freshly-mutated attempt actually finishes a lap, not just
+    # the single best one -- the headline fitness can look "stuck early"
+    # for a while even once the population as a whole is finishing most
+    # attempts, since only strict improvements get checkpointed/printed.
+    recent_results = deque(maxlen=20 * args.pop)
+    total_evaluated, total_finished = 0, 0
 
     with Pool(args.workers, initializer=_init_worker, initargs=(args.circuit, args.data_dir)) as pool, \
          open(hist_path, "a", newline="") as hf:
@@ -170,8 +181,10 @@ def main():
         elite = score_population(pool, [seed])
 
         def _on_pause_tick(_c):
+            rate = (sum(recent_results) / len(recent_results)) if recent_results else None
             save_live(live_path, track, gen, time.time() - t0, sigma, args.pop, args.elite,
-                      args.workers, best_fit, best_fin, best_dist, best_trajectory, paused=True)
+                      args.workers, best_fit, best_fin, best_dist, best_trajectory, paused=True,
+                      recent_success_rate=rate, total_evaluated=total_evaluated, total_finished=total_finished)
 
         while True:
             if wait_while_paused(ctrl_path, on_tick=_on_pause_tick):
@@ -184,7 +197,12 @@ def main():
                 f, d, fin, g = elite[rng.integers(len(elite))]
                 focus = track.length if fin else d
                 kids.append(mutate(g, track.length, rng, sigma, focus))
-            scored = elite + score_population(pool, kids)
+            kid_results = score_population(pool, kids)
+            for f, d, fin, g in kid_results:
+                recent_results.append(fin)
+                total_evaluated += 1
+                total_finished += int(fin)
+            scored = elite + kid_results
             scored.sort(key=lambda x: x[0])
             dedup, seen = [], set()
             for f, d, fin, g in scored:
@@ -210,8 +228,11 @@ def main():
                     sigma = max(0.25, sigma * 0.7)
                     stale = 0
 
+            recent_rate = sum(recent_results) / len(recent_results)
             save_live(live_path, track, gen, time.time() - t0, sigma, args.pop, args.elite,
-                      args.workers, best_fit, best_fin, best_dist, best_trajectory, paused=False)
+                      args.workers, best_fit, best_fin, best_dist, best_trajectory, paused=False,
+                      recent_success_rate=recent_rate, total_evaluated=total_evaluated,
+                      total_finished=total_finished)
 
     print(f"done (stopped or --hours elapsed). best fitness={best_fit:.3f} -> {out_path}", flush=True)
 
