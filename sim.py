@@ -1234,6 +1234,7 @@ def simulate_trajectory(track: Track, switches_m, stride: int = 4) -> dict:
     state = init_state(track)
     held, idx, cum = True, 0, 0.0
     xs, ys, speeds, throttle, times = [], [], [], [], []
+    events_log = []  # [(x, y, event_str), ...] -- every non-None event, for reward/pain markers
     max_ticks = int(MAX_LAP_TIME / DT)
     outcome = "timeout"
     for tick in range(max_ticks):
@@ -1248,13 +1249,18 @@ def simulate_trajectory(track: Track, switches_m, stride: int = 4) -> dict:
             delta += track.lap_length
         cum += delta
 
-        if tick % stride == 0:
+        if tick % stride == 0 or ev:
             heading = track.samp_angle(track.H, state["s"])
-            xs.append(track.samp(track.X, state["s"]) - fsin(heading) * state["e"])
-            ys.append(track.samp(track.Y, state["s"]) + fcos(heading) * state["e"])
-            speeds.append(math.hypot(state["vx"], state["vy"]))
-            throttle.append(1.0 if held else -1.0)
-            times.append(state["t"])
+            x = track.samp(track.X, state["s"]) - fsin(heading) * state["e"]
+            y = track.samp(track.Y, state["s"]) + fcos(heading) * state["e"]
+            if tick % stride == 0:
+                xs.append(x)
+                ys.append(y)
+                speeds.append(math.hypot(state["vx"], state["vy"]))
+                throttle.append(1.0 if held else -1.0)
+                times.append(state["t"])
+            if ev:
+                events_log.append((x, y, ev))
 
         if ev == "crash":
             outcome = "crash"
@@ -1264,4 +1270,4 @@ def simulate_trajectory(track: Track, switches_m, stride: int = 4) -> dict:
             break
 
     return dict(x=xs, y=ys, speed=speeds, throttle=throttle, t=times, outcome=outcome,
-                final_time=state["t"], final_dist=min(cum, track.length))
+                final_time=state["t"], final_dist=min(cum, track.length), events=events_log)
