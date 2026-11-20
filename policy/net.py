@@ -38,6 +38,24 @@ def feature_vector(track: sim.Track, state: dict, prev_action: float) -> np.ndar
     return np.array(feats, dtype=np.float64)
 
 
+def initial_weights(rng: np.random.Generator) -> np.ndarray:
+    """A sensible starting point beats pure-random init here: small random
+    weights make the net's tanh output flip almost randomly tick to tick
+    (since logits start near zero), which behaves like noisy button-
+    mashing and crashes immediately almost every time regardless of what
+    it's "looking at" -- there is no usable fitness gradient to climb out
+    of that. Biasing the output toward "hold" instead starts every rollout
+    equivalent to the known full-throttle baseline (a clean, consistent
+    ~500 m before it crashes, see sim.py's docstring/tests), which gives
+    ES an actual starting point to learn deviations (brake zones) from --
+    exactly how the sequence optimizer's own seed-from-empty-genome works.
+    """
+    w = rng.normal(0, 0.15, N_WEIGHTS)
+    w1, b1, w2, b2 = unpack_weights(w)
+    b2[:] = 2.0  # tanh(2.0) ~= 0.96 -> "hold" by default until evidence says otherwise
+    return w
+
+
 def unpack_weights(w: np.ndarray):
     i = 0
     w1 = w[i:i + N_INPUTS * N_HIDDEN].reshape(N_INPUTS, N_HIDDEN); i += N_INPUTS * N_HIDDEN
@@ -89,6 +107,7 @@ def rollout_traced(track: sim.Track, weights: np.ndarray, stride: int = 8,
     cum_dist = 0.0
     max_ticks = int(max_time / sim.DT)
     xs, ys, speeds, throttle = [], [], [], []
+    events_log = []
     outcome = "timeout"
     for tick in range(max_ticks):
         score = forward(weights, feature_vector(track, state, prev_action))
@@ -103,12 +122,17 @@ def rollout_traced(track: sim.Track, weights: np.ndarray, stride: int = 8,
             delta += track.lap_length
         cum_dist += delta
 
-        if tick % stride == 0:
+        if tick % stride == 0 or ev:
             heading = track.samp_angle(track.H, state["s"])
-            xs.append(track.samp(track.X, state["s"]) - sim.fsin(heading) * state["e"])
-            ys.append(track.samp(track.Y, state["s"]) + sim.fcos(heading) * state["e"])
-            speeds.append(math.hypot(state["vx"], state["vy"]))
-            throttle.append(1.0 if held else -1.0)
+            x = track.samp(track.X, state["s"]) - sim.fsin(heading) * state["e"]
+            y = track.samp(track.Y, state["s"]) + sim.fcos(heading) * state["e"]
+            if tick % stride == 0:
+                xs.append(x)
+                ys.append(y)
+                speeds.append(math.hypot(state["vx"], state["vy"]))
+                throttle.append(1.0 if held else -1.0)
+            if ev:
+                events_log.append((x, y, ev))
 
         if ev == "crash":
             outcome = "crash"
@@ -120,4 +144,5 @@ def rollout_traced(track: sim.Track, weights: np.ndarray, stride: int = 8,
     result = sim.Result(time=state["t"] if outcome != "finished" else state["last"],
                          finished=outcome == "finished",
                          dist=track.length if outcome == "finished" else min(cum_dist, track.length))
-    return dict(result=result, trajectory=dict(x=xs, y=ys, speed=speeds, throttle=throttle, outcome=outcome))
+    return dict(result=result, trajectory=dict(x=xs, y=ys, speed=speeds, throttle=throttle,
+                                                outcome=outcome, events=events_log))
