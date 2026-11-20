@@ -2,6 +2,7 @@ numpy>=1.24
 matplotlib>=3.7
 pytest>=7.4
 
-# Only needed for replay.py (live verification against the real page):
-# playwright>=1.40
-# (then run: playwright install chromium)
+# Needed for replay.py, live_driver.py, and the dashboard's live-game view
+# (drives the real page in Practice mode): pip install, then
+# `playwright install chromium` once to fetch the browser binary.
+playwright>=1.40
