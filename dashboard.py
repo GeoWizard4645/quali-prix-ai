@@ -122,6 +122,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
         elif parsed.path == "/api/circuits":
@@ -259,7 +260,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #curveCanvas { height:180px; }
   #nnCanvas { height:210px; }
   #policyTrackCanvas { height:190px; }
-  #liveImg { width:100%; border-radius:10px; background:#000; display:block; aspect-ratio: 1180/760; object-fit:contain; }
+  #liveImg { width:100%; border-radius:10px; background:#000; display:block; aspect-ratio: 880/560; object-fit:contain; }
 
   .medal-row { display:flex; gap:8px; margin-top:10px; font-size:12px; flex-wrap:wrap; }
   .medal { padding:3px 10px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); }
@@ -357,10 +358,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <span class="badge" id="liveGameBadge">off</span>
       <button class="small pill-btn" id="liveGamePauseBtn" onclick="toggleEngine('live')">▶ Watch it play live</button>
     </div>
-    <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap:16px;">
+    <div style="display:grid; grid-template-columns: 1.3fr 0.9fr 1fr; gap:16px;">
       <div>
         <img id="liveImg" src="" alt="not watching live right now">
         <div class="note" id="liveGameNote">Click "Watch it play live" to open a real browser against the live game and replay the current best genome there, continuously. <b>This runs in real/ranked mode</b> -- a finished lap counts and can show up in the live site's public times listing (start <code>live_driver.py --practice</code> yourself instead if you'd rather it not count).</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;">Estimated position (not the sim replay)</div>
+        <canvas id="liveTrackCanvas" style="height:200px;"></canvas>
+        <div class="note">This orange dot is <b>not</b> live telemetry -- the real game doesn't expose that. It's the time elapsed in the current live attempt, looked up against the <i>simulated</i> prediction for the same genome. It's only accurate up until a live spin/crash departs from that prediction (see note below) -- after that it'll look wrong until the next attempt starts.</div>
       </div>
       <div class="note">
         <b>How this works:</b> a background Playwright browser loads the real page, confirms via the page's own toggle state which mode it's in (refuses to send input if it can't tell), and replays the current best genome's exact press/release timing with the real Up-arrow key. It restarts automatically after a lap or a spin, and <b>auto-pauses after ~20 live minutes or 20 attempts</b> so it never runs unattended all night against the real site -- press the button again to watch another session.
@@ -509,6 +515,13 @@ function fitTransform(xs, ys, w, h, pad) {
 }
 
 let carAnimStart = {};
+let lastTrajectorySig = null, lastPolicyTrajectorySig = null;
+function trajectorySignature(traj) {
+  // Cheap fingerprint of "is this the same lap as last time" -- avoids
+  // JSON.stringify-ing the whole (potentially 600+ point) trajectory just
+  // to compare it every 1.5s poll.
+  return `${traj.outcome}|${traj.final_time}|${traj.final_dist}|${traj.x ? traj.x.length : 0}`;
+}
 function drawTrackOnCanvas(canvas, traj, animKey) {
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
@@ -724,6 +737,36 @@ function updateScoreAndFeed(history, trackLength, medals) {
   document.getElementById('rewardPct').textContent = (lastFit != null && lastFit < 1000) ? rewardPct.toFixed(0) + '% to Gold' : 'not finished yet';
 }
 
+const liveTrackCanvas = document.getElementById('liveTrackCanvas');
+
+function drawLiveEstimatedPosition(attemptElapsedS) {
+  const ctx = liveTrackCanvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = liveTrackCanvas.clientWidth, h = liveTrackCanvas.clientHeight;
+  liveTrackCanvas.width = w * dpr; liveTrackCanvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!trackSummary) return;
+  const tf = fitTransform(trackSummary.x, trackSummary.y, w, h, 18);
+  ctx.strokeStyle = '#2c2c2a'; ctx.lineWidth = 7;
+  ctx.beginPath();
+  trackSummary.x.forEach((x, i) => {
+    const [px, py] = tf(x, trackSummary.y[i]);
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  });
+  ctx.closePath(); ctx.stroke();
+
+  if (attemptElapsedS == null || !lastTrajectory || !lastTrajectory.t || !lastTrajectory.t.length) return;
+  const t = lastTrajectory.t;
+  let idx = 0;
+  while (idx < t.length - 1 && t[idx] < attemptElapsedS) idx++;
+  if (attemptElapsedS > t[t.length - 1] + 2) return;  // well past the known schedule -- don't show a stale guess
+  const [px, py] = tf(lastTrajectory.x[idx], lastTrajectory.y[idx]);
+  ctx.fillStyle = '#fab219';
+  ctx.beginPath(); ctx.arc(px, py, 7, 0, 2 * Math.PI); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+}
+
 async function pollLiveGame() {
   const dot = document.getElementById('liveGameDot');
   const badge = document.getElementById('liveGameBadge');
@@ -741,6 +784,7 @@ async function pollLiveGame() {
     }
     if (r.status && r.status.note) note.textContent = r.status.note +
       (r.status.attempts != null ? ` (attempt ${r.status.attempts})` : '');
+    drawLiveEstimatedPosition(r.status ? r.status.attempt_elapsed_s : null);
   } catch (e) { /* live_driver.py probably isn't running */ }
 }
 
@@ -783,7 +827,19 @@ async function poll() {
       }
     }
 
-    if (live && live.trajectory) { lastTrajectory = live.trajectory; delete carAnimStart['main']; }
+    if (live && live.trajectory) {
+      // Only restart the replay animation when it's actually a DIFFERENT
+      // lap -- the API re-sends the same best trajectory on every poll
+      // (not just when it changes), and resetting carAnimStart every poll
+      // made a single ~45s successful lap look like it was restarting
+      // every ~1.5s, which reads as constant crashing when it isn't.
+      const sig = trajectorySignature(live.trajectory);
+      if (sig !== lastTrajectorySig) {
+        lastTrajectorySig = sig;
+        delete carAnimStart['main'];
+      }
+      lastTrajectory = live.trajectory;
+    }
     drawTrackOnCanvas(trackCanvas, lastTrajectory, 'main');
     document.getElementById('trackTitle').textContent =
       (live && live.best_finished) ? `${vivName(currentCircuit)}'s best lap -- ${fmtTime(live.best_lap_time)}` : 'Best attempt so far (not yet a clean lap)';
@@ -796,7 +852,14 @@ async function poll() {
       policyBadge.textContent = policy.live.paused ? 'paused' : 'training';
       policyBadge.className = 'badge ' + (policy.live.paused ? 'off' : 'on');
       engineState.policy.paused = !!policy.live.paused;
-      if (policy.live.trajectory) { lastPolicyTrajectory = policy.live.trajectory; delete carAnimStart['policy']; }
+      if (policy.live.trajectory) {
+        const sig = trajectorySignature(policy.live.trajectory);
+        if (sig !== lastPolicyTrajectorySig) {
+          lastPolicyTrajectorySig = sig;
+          delete carAnimStart['policy'];
+        }
+        lastPolicyTrajectory = policy.live.trajectory;
+      }
     } else {
       policyBadge.textContent = 'not running'; policyBadge.className = 'badge off';
     }

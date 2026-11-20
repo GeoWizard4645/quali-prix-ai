@@ -1184,6 +1184,10 @@ class Result:
     dist: float
     events: list = field(default_factory=list)
     crashed: bool = False
+    risk_events: int = 0  # count of near-misses (spin/save/scrape) along the way
+
+
+_RISK_EVENTS = ("save", "spin", "scrape")
 
 
 def simulate(track: Track, switches_m, record: bool = False) -> Result:
@@ -1199,6 +1203,7 @@ def simulate(track: Track, switches_m, record: bool = False) -> Result:
     cum_dist = 0.0
     events = []
     last_held = held
+    risk_events = 0
     max_ticks = int(MAX_LAP_TIME / DT)
 
     for tick in range(max_ticks):
@@ -1216,14 +1221,18 @@ def simulate(track: Track, switches_m, record: bool = False) -> Result:
         if delta < -track.lap_length / 2:
             delta += track.lap_length
         cum_dist += delta
+        if ev in _RISK_EVENTS:
+            risk_events += 1
 
         if ev == "crash":
             return Result(time=state["t"], finished=False, dist=min(cum_dist, track.length),
-                          events=events, crashed=True)
+                          events=events, crashed=True, risk_events=risk_events)
         if ev in ("best", "lap"):
-            return Result(time=state["last"], finished=True, dist=track.length, events=events)
+            return Result(time=state["last"], finished=True, dist=track.length, events=events,
+                          risk_events=risk_events)
 
-    return Result(time=state["t"], finished=False, dist=min(cum_dist, track.length), events=events)
+    return Result(time=state["t"], finished=False, dist=min(cum_dist, track.length), events=events,
+                  risk_events=risk_events)
 
 
 def simulate_trajectory(track: Track, switches_m, stride: int = 4) -> dict:

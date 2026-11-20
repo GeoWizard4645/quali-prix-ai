@@ -7,9 +7,16 @@ simulated attempt, 100 m before the line; track.length = lap_length +
 runup_m). The car holds the button from 0 to switches[0], releases to
 switches[1], and so on, starting held.
 
-Fitness: a finished lap is scored by lap time (seconds). A crash is scored
-1000 + (track.length - dist_reached), so there is a gradient toward getting
-further before crashing, and any finished lap beats any crash.
+Fitness: a finished lap is scored by lap time (seconds), plus a small
+penalty per near-miss recovery event along the way (a "save"/"spin"/
+"scrape" -- see sim.py's step()) so that, between two similarly-fast
+finishes, the cleaner one wins; this also nudges the search away from
+genomes that only survive a corner by the skin of their teeth, which are
+exactly the ones that tend not to survive the live page's own timing
+(see README's Fidelity section). A crash is scored 1000 + 3 x (track.length
+- dist_reached) -- a steep, immediate penalty for failing at all, with a
+strong gradient toward getting further before crashing. Any finished lap
+always beats any crash, no matter how risky.
 
 Usage:
     python3 optimize.py --circuit lasvegas
@@ -42,6 +49,9 @@ MEDALS = {
     "lasvegas": {"gold": 43.000, "silver": 43.800, "bronze": 47.200},
 }
 
+CRASH_GRADIENT_MULT = 3.0   # steepness of the "get further before crashing" pressure
+RISK_EVENT_PENALTY = 0.15   # seconds of fitness penalty per near-miss recovery in a finished lap
+
 
 def _init_worker(circuit: str, data_dir: str):
     global TRACK
@@ -50,7 +60,10 @@ def _init_worker(circuit: str, data_dir: str):
 
 def evaluate(genome):
     r = sim.simulate(TRACK, genome)
-    fit = r.time if r.finished else 1000.0 + (TRACK.length - r.dist)
+    if r.finished:
+        fit = r.time + RISK_EVENT_PENALTY * r.risk_events
+    else:
+        fit = 1000.0 + CRASH_GRADIENT_MULT * (TRACK.length - r.dist)
     return fit, r.dist, r.finished
 
 
@@ -86,6 +99,10 @@ def score_population(pool, genomes):
 
 
 def save_best(path, track, genome, fit, finished, dist):
+    """Returns the genome's true (un-penalized) lap time if it finished,
+    else None -- the caller uses this for display/medal comparisons, since
+    `fit` includes the risk-event penalty used for selection and is NOT
+    the real lap time."""
     r = sim.simulate(track, genome, record=True)
     events_out = [(tick, bool(held)) for tick, held in r.events]
     with open(path, "w") as f:
@@ -95,6 +112,7 @@ def save_best(path, track, genome, fit, finished, dist):
             "lap_time": r.time if r.finished else None,
             "finished": r.finished,
             "dist_reached": r.dist,
+            "risk_events": r.risk_events,
             "lap_length": track.lap_length,
             "sim_length": track.length,
             "runup_m": track.runup_m,
@@ -102,6 +120,7 @@ def save_best(path, track, genome, fit, finished, dist):
             "switches_m": genome,
             "events": events_out,
         }, f, indent=1)
+    return r.time if r.finished else None
 
 
 def save_live(path, track, gen, elapsed, sigma, pop, elite_n, workers,
@@ -213,6 +232,7 @@ def main():
             elite = dedup[:args.elite]
 
             if elite[0][0] < best_fit - 1e-9:
+                improvement = best_fit - elite[0][0]
                 best_fit, best_dist, best_fin, best_g = elite[0]
                 save_best(out_path, track, best_g, best_fit, best_fin, best_dist)
                 hist.writerow([gen, round(time.time() - t0, 1), round(best_fit, 4)])
@@ -221,12 +241,25 @@ def main():
                 status = "FINISHED" if best_fin else f"dist={best_dist:.1f}/{track.length:.1f}"
                 print(f"gen {gen}: fitness={best_fit:.3f} {status} sigma={sigma:.2f} "
                       f"elapsed={time.time()-t0:.0f}s", flush=True)
-                stale = 0
+                # A big jump (e.g. first finish, or escaping a local optimum)
+                # genuinely resets patience. But once we're fine-tuning an
+                # already-finishing lap, gains shrink to hundredths of a
+                # second -- treating THOSE as "real progress" forever kept
+                # sigma stuck at its wide starting value (25 m switches)
+                # indefinitely, since *some* tiny improvement arrived often
+                # enough to keep resetting the stall counter before it ever
+                # reached the old threshold of 40. Only a meaningful jump
+                # fully resets patience now; small ones still count toward
+                # shrinking the search radius, so it actually narrows in.
+                if improvement > 0.02 or not best_fin:
+                    stale = 0
+                else:
+                    stale += 1
             else:
                 stale += 1
-                if stale >= 40:
-                    sigma = max(0.25, sigma * 0.7)
-                    stale = 0
+            if stale >= 15:
+                sigma = max(0.1, sigma * 0.6)
+                stale = 0
 
             recent_rate = sum(recent_results) / len(recent_results)
             save_live(live_path, track, gen, time.time() - t0, sigma, args.pop, args.elite,

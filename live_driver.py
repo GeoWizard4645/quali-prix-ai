@@ -68,8 +68,15 @@ def main():
     ap.add_argument("--frame-out", default=None, help="default: runs/<circuit>_live_frame.jpg")
     ap.add_argument("--status-out", default=None, help="default: runs/<circuit>_live_status.json")
     ap.add_argument("--url", default=URL)
-    ap.add_argument("--headless", action="store_true", default=True)
-    ap.add_argument("--headed", dest="headless", action="store_false")
+    # Headed by default: Playwright's headless mode uses a stripped-down
+    # "headless shell" binary that falls back to swiftshader *software*
+    # WebGL rendering for this game's 3D scene -- measured at 30+ minutes
+    # of CPU time for one Chromium GPU helper process in ~25 minutes of
+    # wall clock (i.e. pegging a full core just rendering frames nobody's
+    # compositing), which is almost certainly why the live feed was so
+    # slow/glitchy. A headed window uses real GPU acceleration instead.
+    ap.add_argument("--headed", action="store_true", default=True)
+    ap.add_argument("--headless", dest="headed", action="store_false")
     ap.add_argument("--practice", action="store_true",
                      help="use Practice mode instead of real/ranked mode (see live_common.py)")
     args = ap.parse_args()
@@ -88,12 +95,13 @@ def main():
     session_start = None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless)
-        page = browser.new_page(viewport={"width": 1180, "height": 760})
+        browser = p.chromium.launch(headless=not args.headed,
+                                     args=["--window-size=900,620", "--window-position=0,0"])
+        page = browser.new_page(viewport={"width": 880, "height": 560})
         page_loaded = False
         last_shot_t = [0.0]
 
-        def snapshot(note="", force=False):
+        def snapshot(note="", force=False, attempt_elapsed_s=None):
             now = time.monotonic()
             if force or now - last_shot_t[0] >= MIN_SCREENSHOT_INTERVAL_S:
                 last_shot_t[0] = now
@@ -105,8 +113,15 @@ def main():
                     save_status(status_path, circuit=args.circuit, attempts=attempts,
                                 note=f"screenshot failed: {e}", updated_at=time.time())
                     return
+            # attempt_elapsed_s lets the dashboard estimate where the live
+            # car is on the track right now, by looking up this same time
+            # offset in the simulated trajectory for the genome being
+            # replayed -- we don't have the real game's internal position,
+            # but we ARE sending it the exact same timed inputs, so this is
+            # a reasonable estimate (good until a live spin/crash departs
+            # from the simulated prediction -- see the Fidelity section).
             save_status(status_path, circuit=args.circuit, attempts=attempts,
-                        note=note, updated_at=time.time())
+                        note=note, updated_at=time.time(), attempt_elapsed_s=attempt_elapsed_s)
 
         def on_pause_tick(_c):
             nonlocal page_loaded
@@ -155,15 +170,17 @@ def main():
 
             schedule = events_to_schedule(best["events"], best["dt"])
             attempts += 1
-            snapshot(f"attempt {attempts}: replaying {best.get('lap_time') or 'a crash'} genome", force=True)
+            snapshot(f"attempt {attempts}: replaying {best.get('lap_time') or 'a crash'} genome",
+                     force=True, attempt_elapsed_s=0.0)
 
             def extra_stop():
                 c = read_control(ctrl_path)
                 return bool(c.get("paused") or c.get("stop"))
 
             interrupt_check = make_interrupt_checker(page, extra_stop=extra_stop)
-            replay_schedule_sync(page, schedule, on_tick=lambda _t: snapshot(
-                f"attempt {attempts}/{MAX_ATTEMPTS_PER_SESSION}"), tick_s=0.2, stop_check=interrupt_check)
+            replay_schedule_sync(page, schedule, on_tick=lambda t: snapshot(
+                f"attempt {attempts}/{MAX_ATTEMPTS_PER_SESSION}", attempt_elapsed_s=t),
+                tick_s=0.2, stop_check=interrupt_check)
 
             reason = interrupt_check.reason()
             if reason == "paused":
