@@ -325,6 +325,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="small pill-btn" id="optPauseBtn" onclick="toggleEngine('optimize')">⏸ Pause</button>
     </div>
     <canvas id="trackCanvas"></canvas>
+    <div class="note" id="trackReplayNote">🏁 marks the start/finish line. The coloured path is the <b>entire</b> lap already driven, replayed on a loop -- the white dot is just where that replay is right now, not the car's live position.</div>
+    <div class="note" id="trackProgress"></div>
     <div class="medal-row" id="medalRow"></div>
   </div>
 
@@ -358,10 +360,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap:16px;">
       <div>
         <img id="liveImg" src="" alt="not watching live right now">
-        <div class="note" id="liveGameNote">Click "Watch it play live" to open a real browser against the live game (Practice mode only -- never submits a time) and replay the current best genome there, continuously.</div>
+        <div class="note" id="liveGameNote">Click "Watch it play live" to open a real browser against the live game and replay the current best genome there, continuously. <b>This runs in real/ranked mode</b> -- a finished lap counts and can show up in the live site's public times listing (start <code>live_driver.py --practice</code> yourself instead if you'd rather it not count).</div>
       </div>
       <div class="note">
-        <b>How this works:</b> a background Playwright browser loads the real page, confirms Practice mode is on (it refuses to send any input otherwise), and replays the current best genome's exact press/release timing with the real Up-arrow key. It restarts automatically after a lap or a spin, and <b>auto-pauses after ~30 live minutes or 40 attempts</b> so it never runs unattended all night against the real site -- press the button again to watch another session.
+        <b>How this works:</b> a background Playwright browser loads the real page, confirms via the page's own toggle state which mode it's in (refuses to send input if it can't tell), and replays the current best genome's exact press/release timing with the real Up-arrow key. It restarts automatically after a lap or a spin, and <b>auto-pauses after ~20 live minutes or 20 attempts</b> so it never runs unattended all night against the real site -- press the button again to watch another session.
         <br><br>Live timing sync with the real page is a bit looser than the simulator (which is tick-for-tick verified against the real physics code, see README) -- the live car sometimes spins out earlier than the simulator predicted. That's an open, honest gap in the input-replay layer, not the physics model.
         <div id="liveGameStatus" class="note" style="margin-top:8px;"></div>
       </div>
@@ -408,9 +410,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 python3 optimize.py --circuit lasvegas        # terminal 1: let it learn (runs until paused)
 python3 policy/train.py --circuit lasvegas    # terminal 2: optional, trains the NN panel
 python3 dashboard.py                          # terminal 3: this page</pre>
-    <p>Then open <code id="helpUrl">this page's URL</code>. Use the <b>⏸ Pause / ▶ Resume</b> buttons on each panel any time -- no need to stop the terminal. <code>Ctrl+C</code> in a terminal fully stops that engine; running the same command again resumes from its last checkpoint automatically.</p>
+    <p>Then open <code id="helpUrl">this page's URL</code>. Use the <b>⏸ Pause / ▶ Resume</b> buttons on each panel any time -- no need to stop the terminal.</p>
+    <p><b>Pausing never loses progress.</b> It just stops the next generation from starting; nothing in memory is discarded and nothing on disk is touched differently. The best genome/weights found so far are already saved to <code>runs/*_best.json</code> / <code>runs/policy_*.npy</code> the moment they're found, not just on pause. <code>Ctrl+C</code> in a terminal fully stops that engine the same way -- running the exact same command again resumes from that saved checkpoint, picking up right where it left off.</p>
     <p>Share <code id="helpLanUrl">the LAN URL</code> with anyone on the same Wi-Fi to watch along -- nothing here leaves your network.</p>
-    <p>The "Watch it play live" button drives the <b>real</b> game in Practice mode. It's off by default and self-pauses after a while, on purpose.</p>
+    <p>The "Watch it play live" button drives the <b>real</b> game in real/ranked mode by default (a finished lap can appear in the site's public listing) -- it's off by default and self-pauses after a while, on purpose.</p>
   </div>
 </div>
 
@@ -549,6 +552,11 @@ function drawTrackOnCanvas(canvas, traj, animKey) {
         }
       }
     }
+    // start/finish marker -- the lap is a closed loop, so this is both
+    const [fx, fy] = tf(traj.x[0], traj.y[0]);
+    ctx.font = 'bold 16px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('🏁', fx, fy + 6);
+
     const t = traj.t && traj.t.length ? traj.t : traj.x.map((_,i)=>i/30);
     const totalT = t[t.length-1] || 1;
     if (!(animKey in carAnimStart)) carAnimStart[animKey] = performance.now();
@@ -559,7 +567,9 @@ function drawTrackOnCanvas(canvas, traj, animKey) {
     ctx.fillStyle = '#fff';
     ctx.beginPath(); ctx.arc(cx, cy, 6, 0, 2*Math.PI); ctx.fill();
     ctx.strokeStyle = '#3987e5'; ctx.lineWidth = 2; ctx.stroke();
+    return { elapsed, totalT, outcome: traj.outcome };
   }
+  return null;
 }
 
 let curveHistory = [];
@@ -749,6 +759,12 @@ async function poll() {
       statsRow.appendChild(stat('elapsed', Math.floor(live.elapsed_s/60) + 'm ' + Math.floor(live.elapsed_s%60) + 's'));
       statsRow.appendChild(stat(live.best_finished ? 'best lap' : 'best (crashed)',
         live.best_finished ? fmtTime(live.best_lap_time) : (live.best_dist.toFixed(0) + '/' + live.track_length.toFixed(0) + ' m')));
+      if (live.recent_success_rate != null) {
+        statsRow.appendChild(stat('laps finished (recent)', (live.recent_success_rate*100).toFixed(0) + '%'));
+      }
+      if (live.total_finished != null) {
+        statsRow.appendChild(stat('lifetime laps', `${live.total_finished.toLocaleString()} / ${live.total_attempts.toLocaleString()}`));
+      }
       statsRow.appendChild(stat('workers', live.workers));
       updateScoreAndFeed(state.history || [], live.track_length, live.medals);
     } else {
@@ -796,8 +812,12 @@ async function poll() {
 }
 
 function animLoop() {
-  drawTrackOnCanvas(trackCanvas, lastTrajectory, 'main');
+  const r = drawTrackOnCanvas(trackCanvas, lastTrajectory, 'main');
   drawTrackOnCanvas(policyTrackCanvas, lastPolicyTrajectory, 'policy');
+  if (r) {
+    document.getElementById('trackProgress').textContent =
+      `Replaying ${r.outcome === 'finished' ? 'a complete lap' : 'this attempt'}: ${r.elapsed.toFixed(1)}s / ${r.totalT.toFixed(1)}s${r.outcome !== 'finished' ? ' (ends in a crash)' : ''}`;
+  }
   requestAnimationFrame(animLoop);
 }
 
