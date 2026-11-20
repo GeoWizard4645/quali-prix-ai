@@ -1,0 +1,11 @@
+runs/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+.venv/
+venv/
+.DS_Store
+
+# downloaded fresh at test time, not something we should redistribute
+extract/verify/.cache/

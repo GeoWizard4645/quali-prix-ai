@@ -1,0 +1,27 @@
+{
+  "_licence": "MIT",
+  "_credit": "Circuit outline: bacinger/f1-circuits (https://github.com/bacinger/f1-circuits), MIT licence, Copyright (c) 2019-2025 Tomislav Bacinger.",
+  "id": "saopaulo",
+  "name": "Sao Paulo",
+  "circuit": "Sao Paulo",
+  "official": 4298,
+  "wall": 20,
+  "city": false,
+  "L": 4300.5,
+  "DS": 0.5,
+  "M": 8601,
+  "drs": [
+    [
+      3424,
+      4300.5
+    ],
+    [
+      619.5,
+      1376.5
+    ]
+  ],
+  "data": "saopaulo.bin",
+  "width": 22,
+  "handling": "v2",
+  "terrain": "saopaulo-terrain.json"
+}

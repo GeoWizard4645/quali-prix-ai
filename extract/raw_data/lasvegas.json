@@ -1,0 +1,27 @@
+{
+  "_licence": "MIT",
+  "_credit": "Circuit outline: bacinger/f1-circuits (https://github.com/bacinger/f1-circuits), MIT licence, Copyright (c) 2019-2025 Tomislav Bacinger.",
+  "id": "lasvegas",
+  "name": "Las Vegas",
+  "circuit": "Las Vegas",
+  "official": 6186,
+  "wall": 3,
+  "city": false,
+  "L": 6192.5,
+  "DS": 0.5,
+  "M": 12385,
+  "drs": [
+    [
+      2152.5,
+      3892
+    ],
+    [
+      4111,
+      5213
+    ]
+  ],
+  "data": "lasvegas.bin",
+  "width": 22,
+  "handling": "v2",
+  "terrain": "lasvegas-terrain.json"
+}
