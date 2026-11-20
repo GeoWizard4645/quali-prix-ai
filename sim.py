@@ -1224,3 +1224,44 @@ def simulate(track: Track, switches_m, record: bool = False) -> Result:
             return Result(time=state["last"], finished=True, dist=track.length, events=events)
 
     return Result(time=state["t"], finished=False, dist=min(cum_dist, track.length), events=events)
+
+
+def simulate_trajectory(track: Track, switches_m, stride: int = 4) -> dict:
+    """Re-runs a genome recording a (downsampled) x/y/speed/throttle trace,
+    for visualization (plot.py, dashboard.py). `stride` keeps only every
+    Nth tick to bound payload size for the live dashboard.
+    """
+    state = init_state(track)
+    held, idx, cum = True, 0, 0.0
+    xs, ys, speeds, throttle, times = [], [], [], [], []
+    max_ticks = int(MAX_LAP_TIME / DT)
+    outcome = "timeout"
+    for tick in range(max_ticks):
+        while idx < len(switches_m) and cum >= switches_m[idx]:
+            held = not held
+            idx += 1
+        s_before = state["s"]
+        ev = step(track, state, held)
+        s_after = state["s"]
+        delta = s_after - s_before
+        if delta < -track.lap_length / 2:
+            delta += track.lap_length
+        cum += delta
+
+        if tick % stride == 0:
+            heading = track.samp_angle(track.H, state["s"])
+            xs.append(track.samp(track.X, state["s"]) - fsin(heading) * state["e"])
+            ys.append(track.samp(track.Y, state["s"]) + fcos(heading) * state["e"])
+            speeds.append(math.hypot(state["vx"], state["vy"]))
+            throttle.append(1.0 if held else -1.0)
+            times.append(state["t"])
+
+        if ev == "crash":
+            outcome = "crash"
+            break
+        if ev in ("best", "lap"):
+            outcome = "finished"
+            break
+
+    return dict(x=xs, y=ys, speed=speeds, throttle=throttle, t=times, outcome=outcome,
+                final_time=state["t"], final_dist=min(cum, track.length))

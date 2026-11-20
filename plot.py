@@ -42,38 +42,9 @@ def plot_learning_curve(ax, history_path):
         ax.legend()
 
 
-def _lap_trajectory(track, switches_m):
-    """Re-simulate the best genome with per-tick recording for plotting."""
-    state = sim.init_state(track)
-    held, idx, cum = True, 0, 0.0
-    xs, ys, speeds, throttle = [], [], [], []
-    for _ in range(int(sim.MAX_LAP_TIME / sim.DT)):
-        while idx < len(switches_m) and cum >= switches_m[idx]:
-            held = not held
-            idx += 1
-        s_before = state["s"]
-        ev = sim.step(track, state, held)
-        s_after = state["s"]
-        delta = s_after - s_before
-        if delta < -track.lap_length / 2:
-            delta += track.lap_length
-        cum += delta
-
-        heading = track.samp_angle(track.H, state["s"])
-        x = track.samp(track.X, state["s"]) - sim.fsin(heading) * state["e"]
-        y = track.samp(track.Y, state["s"]) + sim.fcos(heading) * state["e"]
-        xs.append(x)
-        ys.append(y)
-        speeds.append((state["vx"] ** 2 + state["vy"] ** 2) ** 0.5)
-        throttle.append(1.0 if held else -1.0)
-
-        if ev in ("crash", "best", "lap"):
-            break
-    return np.array(xs), np.array(ys), np.array(speeds), np.array(throttle)
-
-
 def plot_track(fig, gs_row, track, switches_m, title_suffix=""):
-    xs, ys, speeds, throttle = _lap_trajectory(track, switches_m)
+    traj = sim.simulate_trajectory(track, switches_m, stride=1)
+    xs, ys, speeds, throttle = map(np.array, (traj["x"], traj["y"], traj["speed"], traj["throttle"]))
 
     ax1 = fig.add_subplot(gs_row[0])
     sc = ax1.scatter(xs, ys, c=speeds, cmap="viridis", s=4)

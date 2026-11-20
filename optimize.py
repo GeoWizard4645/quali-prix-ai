@@ -32,6 +32,11 @@ from sim import DT, get_track
 
 TRACK = None
 
+# Medal benchmark times shown on the game's own circuit page, where known.
+MEDALS = {
+    "lasvegas": {"gold": 43.000, "silver": 43.800, "bronze": 47.200},
+}
+
 
 def _init_worker(circuit: str, data_dir: str):
     global TRACK
@@ -94,6 +99,29 @@ def save_best(path, track, genome, fit, finished, dist):
         }, f, indent=1)
 
 
+def save_live(path, track, gen, elapsed, sigma, pop, elite_n, workers,
+              best_fit, best_fin, best_dist, trajectory=None):
+    payload = {
+        "circuit": track.circuit_id,
+        "generation": gen,
+        "elapsed_s": round(elapsed, 1),
+        "pop": pop, "elite": elite_n, "workers": workers, "sigma": round(sigma, 3),
+        "best_fitness": best_fit,
+        "best_finished": best_fin,
+        "best_lap_time": best_fit if best_fin else None,
+        "best_dist": best_dist,
+        "lap_length": track.lap_length,
+        "track_length": track.length,
+        "medals": MEDALS.get(track.circuit_id),
+    }
+    if trajectory is not None:
+        payload["trajectory"] = trajectory
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=8)
@@ -103,10 +131,12 @@ def main():
     ap.add_argument("--circuit", default="lasvegas")
     ap.add_argument("--data-dir", default="extract/raw_data")
     ap.add_argument("--out", default=None, help="default: runs/<circuit>_best.json")
+    ap.add_argument("--live-out", default=None, help="default: runs/<circuit>_live.json (for dashboard.py)")
     ap.add_argument("--no-resume", action="store_true", help="ignore any existing checkpoint and start fresh")
     args = ap.parse_args()
 
     out_path = args.out or f"runs/{args.circuit}_best.json"
+    live_path = args.live_out or f"runs/{args.circuit}_live.json"
     hist_path = os.path.join(os.path.dirname(out_path) or ".", f"{args.circuit}_history.csv")
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
@@ -121,6 +151,7 @@ def main():
 
     sigma, stale, gen = 25.0, 0, 0
     best_fit = float("inf")
+    best_trajectory = None
     t0 = time.time()
     deadline = t0 + args.hours * 3600
 
@@ -150,6 +181,7 @@ def main():
                 save_best(out_path, track, best_g, best_fit, best_fin, best_dist)
                 hist.writerow([gen, round(time.time() - t0, 1), round(best_fit, 4)])
                 hf.flush()
+                best_trajectory = sim.simulate_trajectory(track, best_g, stride=8)
                 status = "FINISHED" if best_fin else f"dist={best_dist:.1f}/{track.length:.1f}"
                 print(f"gen {gen}: fitness={best_fit:.3f} {status} sigma={sigma:.2f} "
                       f"elapsed={time.time()-t0:.0f}s", flush=True)
@@ -159,6 +191,9 @@ def main():
                 if stale >= 40:
                     sigma = max(0.25, sigma * 0.7)
                     stale = 0
+
+            save_live(live_path, track, gen, time.time() - t0, sigma, args.pop, args.elite,
+                      args.workers, best_fit, best_fin, best_dist, best_trajectory)
 
     print(f"done. best fitness={best_fit:.3f} -> {out_path}", flush=True)
 

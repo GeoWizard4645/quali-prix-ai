@@ -10,6 +10,7 @@ Usage:
 """
 import argparse
 import csv
+import json
 import os
 import sys
 import time
@@ -19,7 +20,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sim
-from policy.net import N_WEIGHTS, rollout
+from policy.net import N_HIDDEN, N_INPUTS, N_OUTPUTS, N_WEIGHTS, rollout, rollout_traced, unpack_weights
 
 TRACK = None
 
@@ -45,6 +46,25 @@ def _rank_shaped_weights(fitnesses: np.ndarray) -> np.ndarray:
     return shaped
 
 
+def save_live(path, track, gen, elapsed, sigma, lr, pop, workers, best_fit, weights, trajectory=None):
+    w1, b1, w2, b2 = unpack_weights(weights)
+    payload = {
+        "circuit": track.circuit_id,
+        "generation": gen,
+        "elapsed_s": round(elapsed, 1),
+        "sigma": sigma, "lr": lr, "pop": pop, "workers": workers,
+        "best_fitness": best_fit,
+        "architecture": {"n_inputs": N_INPUTS, "n_hidden": N_HIDDEN, "n_outputs": N_OUTPUTS},
+        "weights": {"w1": w1.tolist(), "b1": b1.tolist(), "w2": w2.tolist(), "b2": b2.tolist()},
+    }
+    if trajectory is not None:
+        payload["trajectory"] = trajectory
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=4)
@@ -55,14 +75,17 @@ def main():
     ap.add_argument("--circuit", default="lasvegas")
     ap.add_argument("--data-dir", default="extract/raw_data")
     ap.add_argument("--out", default=None, help="default: runs/policy_<circuit>.npy")
+    ap.add_argument("--live-out", default=None, help="default: runs/policy_<circuit>_live.json")
     ap.add_argument("--no-resume", action="store_true")
     args = ap.parse_args()
     if args.pop % 2 != 0:
         args.pop += 1
 
     out_path = args.out or f"runs/policy_{args.circuit}.npy"
+    live_path = args.live_out or f"runs/policy_{args.circuit}_live.json"
     hist_path = f"runs/policy_{args.circuit}_history.csv"
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    track_for_live = sim.get_track(args.circuit, args.data_dir)
 
     rng = np.random.default_rng()
     mu = rng.normal(0, 0.3, N_WEIGHTS)
@@ -73,6 +96,8 @@ def main():
     t0 = time.time()
     deadline = t0 + args.hours * 3600
     best_fit = float("inf")
+    best_weights = mu.copy()
+    best_trajectory = None
     gen = 0
 
     with Pool(args.workers, initializer=_init_worker, initargs=(args.circuit, args.data_dir)) as pool, \
@@ -88,9 +113,12 @@ def main():
             cur_best = fitnesses.min()
             if cur_best < best_fit:
                 best_fit = cur_best
-                np.save(out_path, candidates[fitnesses.argmin()])
+                best_weights = candidates[fitnesses.argmin()]
+                np.save(out_path, best_weights)
                 hist.writerow([gen, round(time.time() - t0, 1), round(best_fit, 4)])
                 hf.flush()
+                traced = rollout_traced(track_for_live, best_weights, stride=8)
+                best_trajectory = traced["trajectory"]
                 print(f"gen {gen}: best_fitness={best_fit:.3f} elapsed={time.time()-t0:.0f}s", flush=True)
 
             # Standard mirrored-sampling ES update: step mu along the
@@ -102,6 +130,9 @@ def main():
             shaped = _rank_shaped_weights(fitnesses[:half]) - _rank_shaped_weights(fitnesses[half:])
             grad = (eps * shaped[:, None]).mean(axis=0)
             mu = mu + args.lr * grad
+
+            save_live(live_path, track_for_live, gen, time.time() - t0, args.sigma, args.lr,
+                      args.pop, args.workers, best_fit, best_weights, best_trajectory)
 
     print(f"done. best_fitness={best_fit:.3f} -> {out_path}", flush=True)
 

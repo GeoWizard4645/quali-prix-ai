@@ -4,6 +4,7 @@ previous action) to a hold/release decision, plus a rollout function that
 drives sim.py's real step() function with it. Shared by train.py and
 eval.py.
 """
+import math
 import os
 import sys
 
@@ -77,3 +78,46 @@ def rollout(track: sim.Track, weights: np.ndarray, max_time: float = sim.MAX_LAP
         if ev in ("best", "lap"):
             return sim.Result(time=state["last"], finished=True, dist=track.length)
     return sim.Result(time=state["t"], finished=False, dist=min(cum_dist, track.length))
+
+
+def rollout_traced(track: sim.Track, weights: np.ndarray, stride: int = 8,
+                    max_time: float = sim.MAX_LAP_TIME) -> dict:
+    """Like rollout(), but also records a downsampled x/y/speed/throttle
+    trace for the dashboard/plots."""
+    state = sim.init_state(track)
+    prev_action = 1.0
+    cum_dist = 0.0
+    max_ticks = int(max_time / sim.DT)
+    xs, ys, speeds, throttle = [], [], [], []
+    outcome = "timeout"
+    for tick in range(max_ticks):
+        score = forward(weights, feature_vector(track, state, prev_action))
+        held = score > 0.0
+        prev_action = 1.0 if held else -1.0
+
+        s_before = state["s"]
+        ev = sim.step(track, state, held)
+        s_after = state["s"]
+        delta = s_after - s_before
+        if delta < -track.lap_length / 2:
+            delta += track.lap_length
+        cum_dist += delta
+
+        if tick % stride == 0:
+            heading = track.samp_angle(track.H, state["s"])
+            xs.append(track.samp(track.X, state["s"]) - sim.fsin(heading) * state["e"])
+            ys.append(track.samp(track.Y, state["s"]) + sim.fcos(heading) * state["e"])
+            speeds.append(math.hypot(state["vx"], state["vy"]))
+            throttle.append(1.0 if held else -1.0)
+
+        if ev == "crash":
+            outcome = "crash"
+            break
+        if ev in ("best", "lap"):
+            outcome = "finished"
+            break
+
+    result = sim.Result(time=state["t"] if outcome != "finished" else state["last"],
+                         finished=outcome == "finished",
+                         dist=track.length if outcome == "finished" else min(cum_dist, track.length))
+    return dict(result=result, trajectory=dict(x=xs, y=ys, speed=speeds, throttle=throttle, outcome=outcome))

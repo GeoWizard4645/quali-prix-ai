@@ -13,6 +13,21 @@ of ~600.
 [Fidelity](#fidelity-what-is-and-isnt-verified) section below says exactly
 what has and hasn't been checked, and how.
 
+## Quick start
+
+```bash
+cd quali-prix-ai
+source .venv/bin/activate          # one-time setup: see Setup below
+python3 optimize.py --hours 8 --circuit lasvegas   # terminal 1: let it learn
+python3 dashboard.py                                # terminal 2: watch it
+```
+Open the URL `dashboard.py` prints. `Ctrl+C` either one to stop; re-run the
+same `optimize.py` command any time to pick up where it left off. That's
+the whole thing -- everything past this point is detail/reference.
+
+On macOS, if you want the laptop to keep running overnight without going
+to sleep, prefix the optimize command with `caffeinate -s`.
+
 ## What's actually going on
 
 The game's only control is one button: hold to accelerate, release to
@@ -44,6 +59,7 @@ policy/
   train.py         Phase 2: trains the policy with a simple evolution strategy
   eval.py          zero-shot-generalization check (train on one circuit, test on another)
 plot.py            learning curve + speed/throttle track plots
+dashboard.py       live local web dashboard (watch it learn, with friends)
 replay.py          Playwright replay against the LIVE page, Practice mode only
 extract/
   NOTES.md         how the physics and circuit data were found
@@ -62,6 +78,29 @@ pip install -r requirements.txt
 
 (`node` on PATH is only needed for the live fidelity test in `tests/`; a
 recent LTS is fine, nothing project-specific is installed globally.)
+
+## Watch it learn: the live dashboard
+
+```bash
+python3 dashboard.py
+```
+
+This starts a small local web server (stdlib only -- no new dependency)
+that reads `runs/*.json`/`*.csv` and serves a live page: the track with
+the current best lap animated on it (colour = speed), a learning-curve
+chart, gold/silver/bronze medal comparisons, and -- once `policy/train.py`
+is also running -- a live node-link view of the policy network's weights.
+It prints two URLs: one for `localhost`, and one on your LAN
+(`http://<your-ip>:8743`) that anyone on the same Wi-Fi can open to watch
+along. That's LAN-only by design (no cloud, nothing exposed to the wider
+internet) -- ask if you want it reachable from outside your network too.
+
+The first time the car completes a clean lap, the dashboard names it
+**VIV** with a little reveal popup, and labels it that way from then on.
+
+`dashboard.py` only reads files -- it doesn't touch the optimizer process,
+so start/stop/restart `optimize.py` and `policy/train.py` independently of
+it, in any order.
 
 ## Running it overnight
 
@@ -127,7 +166,7 @@ browser makes) and runs it standalone under Node, then diffs it tick-by-
 tick against `sim.py` on a fixed set of genomes across both shipped
 circuits. Run it yourself: `python3 -m pytest tests/ -v`.
 
-Measured results from that test, on this machine, on <DATE>:
+Measured results from that test, on this machine, on 2026-11-20:
 - **13/13** outcome matches (finished/crashed/timed-out) across random and
   hand-picked genomes on both circuits, including 80+ second timeout runs.
 - Position agreement of **~1e-4 m** (sub-millimetre) for ordinary genomes,
@@ -161,30 +200,34 @@ live attempts.
 
 ## Results
 
-Best lap found by `optimize.py` on Las Vegas, after `<RUNTIME>` on
-`<N>` cores (`<GENERATIONS>` generations):
+Best lap found by `optimize.py` on Las Vegas, after a 24-minute test run
+(not the full overnight run) on 10 cores, 47 improving generations:
 
 | | time |
 |---|---|
-| **This optimizer (simulated)** | **`<BEST_TIME>`** |
+| **This optimizer (simulated)** | **0:46.342** |
 | Gold medal | 0:43.000 |
 | Silver medal | 0:43.800 |
-| Bronze medal | 0:47.200 |
+| Bronze medal | 0:47.200 (**beaten**) |
 
-See `runs/lasvegas_plot.png` (`python3 plot.py --circuit lasvegas`) for the
-learning curve and the best lap coloured by speed/throttle.
+It went from crashing 500 m into the lap to a clean, bronze-beating lap in
+about 10 minutes, then kept shaving tenths off for the rest of the run --
+see `runs/lasvegas_plot.png` (`python3 plot.py --circuit lasvegas`) or the
+live dashboard's learning curve. As above, this is a simulator prediction;
+the live-replay gap is unmeasured (see Fidelity).
 
-This is the result of a `<RUNTIME>` test run during development, not a full
-overnight run -- the whole point of `optimize.py --hours 8` is that it
-should do meaningfully better given the night. As above, it's a simulator
-prediction; the live-replay gap is unmeasured.
+**The real 8-hour overnight run is running right now** (started
+2026-11-20, resumed from that 46.342s checkpoint), alongside
+`policy/train.py` and `dashboard.py` -- see the next section to watch it.
 
-## To start the real overnight run
+## To start it yourself (next time)
 
 ```bash
 cd quali-prix-ai
 source .venv/bin/activate
-python3 optimize.py --hours 8 --circuit lasvegas
+python3 optimize.py --hours 8 --circuit lasvegas   # terminal 1
+python3 policy/train.py --hours 8 --circuit lasvegas   # terminal 2 (optional, for the NN panel)
+python3 dashboard.py   # terminal 3
 ```
 
 ## Known weaknesses / honest TODOs
