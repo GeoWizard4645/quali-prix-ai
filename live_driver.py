@@ -1,25 +1,32 @@
 """
 Drives the REAL, live game (gluefold.co.uk/quali-prix) with the current
-best genome, in Practice mode only, and streams screenshots to
-runs/<circuit>_live_frame.jpg + runs/<circuit>_live_status.json for
-dashboard.py's "live game" panel.
+best genome and streams screenshots to runs/<circuit>_live_frame.jpg +
+runs/<circuit>_live_status.json for dashboard.py's "live game" panel.
+
+Runs in **real/ranked mode by default** (`--practice` switches to
+Practice mode instead) -- a finished lap counts and can appear in the live
+site's public times listing under whatever nickname the server assigns
+this session. This was corrected after initially (incorrectly) believing
+Practice mode was engaged throughout; see live_common.py's docstring and
+the README's Fidelity section for exactly what happened and why.
 
 Safety, by design, not just by convention:
-  - start_practice_lap() (live_common.py) refuses to send any input unless
-    it can read the page's own text confirming Practice mode is on, every
-    single attempt.
+  - start_lap() (live_common.py) verifies the actual toggle state via the
+    page's own `aria-pressed` attribute, every single attempt, and raises
+    rather than guessing if it can't confirm which mode it's in.
   - Idle (paused) by default -- it only drives the page while the
     dashboard's Play button for this panel is on (see control.py), so it
     never hits the real site unless you've explicitly asked to watch.
   - Self-pauses after MAX_ATTEMPTS_PER_SESSION attempts or
     MAX_MINUTES_PER_SESSION minutes of continuous driving, so leaving it
     running overnight by accident doesn't turn into unattended, indefinite
-    automated traffic against someone else's small site. Press Play again
-    to do another session.
+    automated traffic against the real site. Press Play again to do
+    another session.
 
 Usage:
     python3 live_driver.py --circuit lasvegas
-    (then toggle it on from the dashboard, or see --autostart)
+    python3 live_driver.py --circuit lasvegas --practice   # Practice mode instead
+    (then toggle it on from the dashboard)
 """
 import argparse
 import json
@@ -31,10 +38,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sim
 from control import control_path, read_control, wait_while_paused, write_control
 from live_common import (events_to_schedule, make_interrupt_checker, read_hud,
-                          replay_schedule_sync, restart_lap, start_practice_lap)
+                          replay_schedule_sync, restart_lap, start_lap)
 
-MAX_ATTEMPTS_PER_SESSION = 40
-MAX_MINUTES_PER_SESSION = 30
+MAX_ATTEMPTS_PER_SESSION = 20
+MAX_MINUTES_PER_SESSION = 20
+MIN_SCREENSHOT_INTERVAL_S = 0.35  # decouple capture rate from the finer input-timing tick loop
 URL = "https://gluefold.co.uk/quali-prix"
 
 
@@ -62,6 +70,8 @@ def main():
     ap.add_argument("--url", default=URL)
     ap.add_argument("--headless", action="store_true", default=True)
     ap.add_argument("--headed", dest="headless", action="store_false")
+    ap.add_argument("--practice", action="store_true",
+                     help="use Practice mode instead of real/ranked mode (see live_common.py)")
     args = ap.parse_args()
 
     from playwright.sync_api import sync_playwright
@@ -81,14 +91,20 @@ def main():
         browser = p.chromium.launch(headless=args.headless)
         page = browser.new_page(viewport={"width": 1180, "height": 760})
         page_loaded = False
+        last_shot_t = [0.0]
 
-        def snapshot(note=""):
-            try:
-                page.screenshot(path=frame_path + ".tmp", type="jpeg", quality=70)
-                os.replace(frame_path + ".tmp", frame_path)
-            except Exception as e:
-                save_status(status_path, circuit=args.circuit, attempts=attempts,
-                            note=f"screenshot failed: {e}", updated_at=time.time())
+        def snapshot(note="", force=False):
+            now = time.monotonic()
+            if force or now - last_shot_t[0] >= MIN_SCREENSHOT_INTERVAL_S:
+                last_shot_t[0] = now
+                try:
+                    page.screenshot(path=frame_path + ".tmp", type="jpeg", quality=60,
+                                     scale="css")
+                    os.replace(frame_path + ".tmp", frame_path)
+                except Exception as e:
+                    save_status(status_path, circuit=args.circuit, attempts=attempts,
+                                note=f"screenshot failed: {e}", updated_at=time.time())
+                    return
             save_status(status_path, circuit=args.circuit, attempts=attempts,
                         note=note, updated_at=time.time())
 
@@ -109,10 +125,10 @@ def main():
                     # exactly once per page load. Every later attempt in
                     # this same session restarts via Space (restart_lap),
                     # not by clicking DRIVE again (see live_common.py).
-                    start_practice_lap(page)
+                    start_lap(page, practice=args.practice)
                 except Exception as e:
                     save_status(status_path, circuit=args.circuit, attempts=attempts,
-                                note=f"could not confirm Practice mode, stopping for safety: {e}",
+                                note=f"could not confirm which mode we're in, stopping for safety: {e}",
                                 updated_at=time.time())
                     write_control(ctrl_path, paused=True)
                     continue
@@ -139,7 +155,7 @@ def main():
 
             schedule = events_to_schedule(best["events"], best["dt"])
             attempts += 1
-            snapshot(f"attempt {attempts}: replaying {best.get('lap_time') or 'a crash'} genome")
+            snapshot(f"attempt {attempts}: replaying {best.get('lap_time') or 'a crash'} genome", force=True)
 
             def extra_stop():
                 c = read_control(ctrl_path)

@@ -1,27 +1,32 @@
 """
 Replays a saved genome's exact press/release events against the LIVE game
-in Practice mode (so crashes don't matter and nothing is submitted to any
-leaderboard), and reports what happened for comparison against the
-simulator's prediction.
+and reports what happened for comparison against the simulator's
+prediction.
+
+Runs in **real/ranked mode by default** -- a finished lap counts and can
+appear in the live site's public times listing. Pass --practice to use
+Practice mode instead. See live_common.py's docstring for why real mode
+is the default (short version: the Practice toggle defaults OFF, not on
+as an earlier version of this script incorrectly assumed).
 
 How this was wired up: a short, limited inspection of the live page (a
 handful of page loads/screenshots, not full lap attempts -- see
-extract/NOTES.md) found that the plain "DRIVE" button enters Practice mode
-by default, the control is "hold anywhere to go / Up arrow works too /
-Space restarts", and the screen-reader text confirms Practice is on. This
-script (via live_common.py) checks that confirmation every time and
-refuses to send input if it can't -- it will never submit a real time.
+extract/NOTES.md) found that the control is "hold anywhere to go / Up
+arrow works too / Space restarts", and that the Practice toggle's real
+live state is its `aria-pressed` attribute, which this script checks
+every time and refuses to send input if it can't confirm.
 
 Usage:
     pip install playwright && playwright install chromium
     python3 replay.py --best runs/lasvegas_best.json
+    python3 replay.py --best runs/lasvegas_best.json --practice
 """
 import argparse
 import json
 import time
 
 from live_common import (events_to_schedule, make_interrupt_checker, read_hud,
-                          replay_schedule_sync, restart_lap, start_practice_lap)
+                          replay_schedule_sync, restart_lap, start_lap)
 
 
 def main():
@@ -30,6 +35,7 @@ def main():
     ap.add_argument("--url", default="https://gluefold.co.uk/quali-prix")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--pointer", action="store_true", help="use pointer events instead of the Up arrow key")
+    ap.add_argument("--practice", action="store_true", help="use Practice mode instead of real/ranked mode")
     args = ap.parse_args()
 
     from playwright.sync_api import sync_playwright
@@ -46,8 +52,8 @@ def main():
         page.goto(args.url, wait_until="load", timeout=45000)
         time.sleep(1.0)
 
-        start_practice_lap(page)
-        print("Practice mode confirmed on. Replaying now...")
+        start_lap(page, practice=args.practice)
+        print(f"Confirmed {'Practice' if args.practice else 'real/ranked'} mode. Replaying now...")
 
         interrupt_check = make_interrupt_checker(page)
         replay_schedule_sync(page, schedule, use_pointer=args.pointer, stop_check=interrupt_check)

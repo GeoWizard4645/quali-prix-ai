@@ -3,18 +3,29 @@ Shared logic for driving the real, live game with Playwright -- used by
 both replay.py (one-shot, for fidelity checking) and live_driver.py
 (continuous, for the dashboard's "watch it play live" view).
 
-Found by a short, limited inspection of the live page (a handful of page
-loads/screenshots, not full lap attempts -- see extract/NOTES.md): the
-plain "DRIVE" button enters Practice mode by default (confirmed via its
-screen-reader text, which this module checks every time before sending any
-input, and refuses to proceed if it doesn't say so -- this project never
-submits a real time). The control is "hold anywhere to go / Up arrow works
-too / Space restarts".
+Correction (found after this was first shipped -- see extract/NOTES.md
+and the README's Fidelity section for the full story): the `.qp-practice-
+btn`'s `aria-pressed` attribute, not its screen-reader text, is the real
+live-state signal. The sr-only text ("Practice on. Crash and you're put
+back on the track. Lap times don't count.") turned out to be a *static*
+description of what the toggle does, present in the DOM either way -- it
+does not change when the toggle is clicked. The ORIGINAL version of this
+file checked that text and concluded Practice was always on; it wasn't.
+`aria-pressed` is "false" by default (Practice OFF -- real/ranked mode)
+and "true" once you click the toggle (Practice ON). That means every
+attempt driven by this project before this fix was real/ranked, not
+Practice -- which is what put an automated car's times on the live site's
+public listing under a server-assigned nickname. The project's author was
+told this directly and asked for real/ranked mode to be the explicit,
+intentional default going forward (not an accident this time) -- `
+start_lap()` now verifies the ACTUAL toggle state via `aria-pressed` and
+defaults to `practice=False` (real/ranked) to match.
+
+The control is "hold anywhere to go / Up arrow works too / Space restarts".
 """
 import time
 
 DRIVE_BUTTON_TEXT = "text=DRIVE"
-PRACTICE_SR_SELECTOR = ".qp-practice-btn + .sr-only, .sr-only"
 HOLD_KEY = "ArrowUp"
 RESTART_KEY = "Space"
 
@@ -32,33 +43,49 @@ def events_to_schedule(events, dt):
     return schedule
 
 
-def start_practice_lap(page, timeout_s=20.0):
+def _practice_is_on(page) -> bool:
+    pressed = page.evaluate("""
+        () => {
+            const el = document.querySelector('.qp-practice-btn');
+            return el ? el.getAttribute('aria-pressed') : null;
+        }
+    """)
+    return pressed == "true"
+
+
+def start_lap(page, practice: bool = False, timeout_s: float = 20.0):
     """Clicks DRIVE, waits for the page's own "hold anywhere to go" prompt
-    (rather than a guessed fixed delay -- this is the car's actual "ready
-    and waiting for your first input" signal, so timing the replay
-    schedule from the moment this returns is as tight a sync point as we
-    can get without the game's own source for its UI layer), and verifies
-    (via the page's own screen-reader text, not a guess) that Practice
-    mode is on. Raises if it can't confirm that -- we never want to risk
-    sending a real timed lap.
+    (the car's actual "ready and waiting for your first input" signal --
+    timing the replay schedule from the moment this returns is as tight a
+    sync point as we can get without the game's own source for its UI
+    layer), then makes sure the Practice toggle matches `practice` --
+    clicking it if the live `aria-pressed` state doesn't already match --
+    and verifies that via the same attribute afterward. Raises if it can't
+    be confirmed either way, so we're never guessing which mode we're in.
+
+    `practice=False` (the default) is real/ranked mode: a finished lap
+    counts and can show up in the live site's public times listing under
+    whatever nickname the server assigns the session. Pass `practice=True`
+    to explicitly use Practice mode instead (crash auto-respawns, and per
+    the page's own copy "lap times don't count" -- though note that claim
+    wasn't verified against the public listing either; see README).
     """
     page.click(DRIVE_BUTTON_TEXT, timeout=timeout_s * 1000)
     try:
         page.wait_for_selector("text=/Hold anywhere to go/i", timeout=timeout_s * 1000)
     except Exception:
         time.sleep(0.8)  # fallback if the page's wording changes
-    practice_text = page.evaluate("""
-        () => {
-            const el = document.querySelector('.qp-practice-btn');
-            const sr = document.querySelector('.sr-only');
-            return (el ? el.getAttribute('aria-pressed') : null) + '|' +
-                   (sr ? sr.innerText : '');
-        }
-    """)
-    if "Practice on" not in practice_text and "true" not in practice_text:
+
+    if _practice_is_on(page) != practice:
+        page.click(".qp-practice-btn")
+        time.sleep(0.5)
+
+    actual = _practice_is_on(page)
+    if actual != practice:
         raise RuntimeError(
-            f"could not confirm Practice mode is on (page said: {practice_text!r}) "
-            "-- refusing to send input, to avoid submitting a real timed lap"
+            f"could not get the Practice toggle into the requested state "
+            f"(wanted practice={practice}, aria-pressed says practice={actual}) "
+            "-- refusing to send input until this is confirmed"
         )
 
 
