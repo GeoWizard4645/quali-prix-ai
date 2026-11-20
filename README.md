@@ -33,6 +33,15 @@ also has its own "How to run this" button with this same cheat sheet.
 On macOS, if you want the laptop to keep running overnight without going
 to sleep, prefix a command with `caffeinate -s`.
 
+**Stop these with the dashboard's Pause button or `Ctrl+C` in their own
+terminal, not `kill` from elsewhere.** Each one runs a multiprocessing
+worker pool; `Ctrl+C` (or a pause) lets it shut those workers down
+cleanly, while an external `kill` on the main process can leave orphaned
+worker processes running and burning CPU indefinitely (this happened
+during development and dragged the whole machine's load average well
+past its core count -- `pkill -f "multiprocessing.spawn"` is the recovery
+if it ever happens to you).
+
 ## What's actually going on
 
 The game's only control is one button: hold to accelerate, release to
@@ -67,8 +76,8 @@ control.py         shared pause/resume file used by optimize.py/train.py/live_dr
 plot.py            learning curve + speed/throttle track plots
 dashboard.py       live local web dashboard (watch it learn, with friends)
 live_common.py     shared real-page driving logic (used by replay.py and live_driver.py)
-live_driver.py     continuously plays the LIVE page in Practice mode for the dashboard's live view
-replay.py          one-shot Playwright replay against the LIVE page, Practice mode only
+live_driver.py     continuously plays the LIVE page (real/ranked mode by default) for the dashboard's live view
+replay.py          one-shot Playwright replay against the LIVE page (real/ranked mode by default)
 extract/
   NOTES.md         how the physics and circuit data were found
   raw_data/        the circuit metadata/binary/terrain files (see NOTES.md)
@@ -132,17 +141,25 @@ in any order.
 
 Click **"Watch it play live"** on the dashboard (off by default) to start
 `live_driver.py`'s loop: a background Playwright browser loads the actual
-`gluefold.co.uk/quali-prix` page, confirms (via the page's own text, every
-single time -- it refuses to send input otherwise) that **Practice mode**
-is on, and replays the current best genome's exact press/release timing
-with the real Up-arrow key, continuously, restarting itself after a lap or
-a spin. Screenshots stream into the dashboard a few times a second.
+`gluefold.co.uk/quali-prix` page, confirms (via the page's own live
+`aria-pressed` toggle state, every single time -- it refuses to send input
+if it can't tell) which mode it's in, and replays the current best
+genome's exact press/release timing with the real Up-arrow key,
+continuously, restarting itself after a lap or a spin. Screenshots stream
+into the dashboard.
 
-It never submits a time to any leaderboard, and it **self-pauses after
-~40 attempts or ~30 live minutes** so leaving it on by accident doesn't
-turn into unattended, indefinite traffic against someone else's small
-site -- press the button again for another session. You can also run it
-standalone: `python3 live_driver.py --circuit lasvegas` (then toggle it
+**This runs in real/ranked mode by default** -- a finished lap counts and
+can appear in the live site's public times listing, under whatever
+nickname the server assigns the session. (An earlier version of this
+incorrectly believed it was always in Practice mode -- see Fidelity below
+for exactly what happened; the project's author has since explicitly
+asked for real mode as the intentional default.) Pass `--practice` to
+`live_driver.py` or `replay.py` if you want Practice mode instead.
+
+It **self-pauses after ~20 attempts or ~20 live minutes** so leaving it on
+by accident doesn't turn into unattended, indefinite traffic against the
+real site -- press the button again for another session. You can also run
+it standalone: `python3 live_driver.py --circuit lasvegas` (then toggle it
 from the dashboard, same as any other engine).
 
 **Be aware of the gap this surfaces**: live timing sync with the real page
@@ -265,20 +282,34 @@ Measured results from that test, on this machine, on 2026-11-20:
   crash/finish boundary.
 
 **The live-game side, now that it's been run:** `replay.py` was run a
-handful of times against the real page in Practice mode (never the
-leaderboard) to wire up `live_driver.py` and the dashboard's live view.
-Practice mode was confirmed on every time via the page's own text before
-any input was sent. Findings:
+handful of times against the real page to wire up `live_driver.py` and
+the dashboard's live view. Findings:
 - The input mechanism is exactly as documented on the page: hold anywhere
   (or the Up arrow) to accelerate, release to brake, Space restarts.
 - The physics-level fidelity work above holds up -- the live car follows
   the same track, takes the same corners, and visibly drives most of a lap
   correctly.
-- **What doesn't yet match**: the *exact* press/release timing a genome
-  was tuned for doesn't always survive live -- the live car has spun out
-  earlier than the simulator predicted for the same genome, more than
-  once. This is a sync-point problem (exactly when the live page's "t=0"
-  begins relative to our script's first input, which depends on the
+- **A real mistake, corrected**: the first version of this checked the
+  Practice toggle's screen-reader text ("Practice on. Crash and you're put
+  back on the track. Lap times don't count.") and concluded Practice mode
+  was always on. That text turned out to be a *static* description of
+  what the toggle does, present in the DOM either way -- it never changes
+  when the toggle is clicked. The toggle's `aria-pressed` attribute is the
+  real live-state signal, and it's `"false"` (Practice **off** -- real/
+  ranked mode) by default. In other words: every live attempt this project
+  ran before that was caught was real/ranked, not Practice -- which is
+  what put an automated car's times on the live site's public listing
+  under a server-assigned nickname. This was found because the project's
+  author checked the real leaderboard and noticed a mismatch; `start_lap()`
+  in `live_common.py` now verifies the actual `aria-pressed` state and
+  defaults to real/ranked mode (`practice=False`) as an intentional
+  choice, not an accident -- the author was told exactly what happened and
+  asked for real mode as the default going forward.
+- **The timing-sync gap**: separately, the *exact* press/release timing a
+  genome was tuned for doesn't always survive live -- the live car has
+  spun out earlier than the simulator predicted for the same genome, more
+  than once. This is a sync-point problem (exactly when the live page's
+  "t=0" begins relative to our script's first input, which depends on the
   React/UI layer we never extracted, not the physics module we did) --
   not evidence the physics port itself is wrong. `live_common.py` detects
   the page's own "Spun out / Tap to restart" prompt and recovers instead
@@ -287,9 +318,10 @@ any input was sent. Findings:
 
 **Bottom line: treat every lap time in this README as a simulator
 prediction until you've watched (or run) a live replay yourself and seen
-it survive the whole lap.** The dashboard's live panel shows this
-honestly too -- when the live car spins out, that's what's actually
-happening on the real site, not a mocked-up animation.
+it survive the whole lap -- and know that watching it live now means real
+attempts on the real site, not a sandboxed copy.** The dashboard's live
+panel shows this honestly too -- when the live car spins out, that's what's
+actually happening on the real site, not a mocked-up animation.
 
 ## Results
 
